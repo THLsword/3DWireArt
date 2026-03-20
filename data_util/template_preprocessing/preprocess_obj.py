@@ -10,8 +10,12 @@ import meshio
 import numpy as np
 import pickle
 
+"""Preprocess a template OBJ mesh into vertices, topology, and adjacency files."""
+
 def load_mesh(path):
+    """Load and normalize a template mesh."""
     def normalize_mesh(mesh):
+        """Center the mesh and scale it to unit size."""
         vertices = mesh.points
 
         v_max = np.amax(vertices, axis = 0)
@@ -30,7 +34,9 @@ def load_mesh(path):
     return mesh
 
 def generate_control_points(vertices, faces):
+    """Generate cubic Bezier-style control points along mesh edges."""
     def calculate_control_points(start, end):
+        """Split an edge into three equal segments and return the inner points."""
         s = np.array(start)
         e = np.array(end)
         interval = (e - s) / 3
@@ -71,6 +77,7 @@ def generate_control_points(vertices, faces):
     return vertex_list, pair_dict, index_dict
  
 def write_vertices(vertex_list, output_dir):
+    """Write processed vertices to `vertices.txt`."""
     f = open(os.path.join(output_dir, 'vertices.txt'), 'w')
     for x, y, z in vertex_list:
         x = format(x, '.2f')
@@ -79,6 +86,7 @@ def write_vertices(vertex_list, output_dir):
         f.writelines(f"RegularVertex {x} {y} {z}\n")
 
 def write_topology(faces, pair_dict, index_dict, output_dir):
+    """Write patch topology to `topology.txt`."""
     topology = []
     for face in faces:
         patch = []
@@ -99,6 +107,7 @@ def write_topology(faces, pair_dict, index_dict, output_dir):
         f.writelines(t)
 
 def write_adjacencies(faces, output_dir):
+    """Write face adjacency information to `adjacencies.txt`."""
     f = open(os.path.join(output_dir, 'adjacencies.txt'), 'w')
     faces = np.array(faces)
     for i_face, face in enumerate(faces):
@@ -116,8 +125,7 @@ def write_adjacencies(faces, output_dir):
         f.write("\n")
 
 if __name__ == '__main__':
-    # 在開始前，先用txt打開obj，把除了v和f的都刪掉(vt,vn)
-
+    # Before running, keep only `v` and `f` entries in the OBJ file.
 
     parser = argparse.ArgumentParser(description = 'Preprocess template .obj data.')
     parser.add_argument('--data-path', type = str, default = 'data/templates/cup24/cup_template.obj',

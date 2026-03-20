@@ -1,11 +1,10 @@
 from mimetypes import init
 import os
 
+"""Generate symmetry pairs for template vertices by mirroring along the x-axis."""
+
 def find_index_with_tolerance(lst, target, tol=1e-6):
-    """
-    在 lst (list of [x,y,z]) 中查找与 target 近似相等的坐标索引，允许一定浮点误差。
-    如果找不到，返回 -1
-    """
+    """Find the index of a point that matches `target` within a tolerance."""
     for i, item in enumerate(lst):
         if (abs(item[0] - target[0]) < tol and
             abs(item[1] - target[1]) < tol and
@@ -47,11 +46,11 @@ for idx in processed_vertices:
     idx2 = find_index_with_tolerance(init_params, mirror, tol=1e-2)
     
     if idx2 == -1:
-        # 说明没有找到对应镜像点，可能跳过或打印提示
+        # Skip vertices whose mirrored counterpart cannot be found.
         print(f"没有在 init_params 中找到镜像顶点：{mirror}")
         continue
     
-    # 如果找到镜像点，再继续你的后续逻辑
+    # Write the symmetry pair after a valid mirrored vertex is found.
     processed.append(idx)
     processed.append(idx2)
     f.write(f"{idx} {idx2}\n")

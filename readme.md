@@ -49,94 +49,18 @@ The current scripts assume the point cloud file is:
 data/models/<model_name>/model_normalized_4096.npz
 ```
 
+The `data_util/` folder contains a few optional preprocessing scripts:
+
+- `data_util/3Dmodel_preprocessing/obj_preprocess.py`: if your input is an `.obj` mesh, you can use this script to sample points from the mesh surface, normalize them, and generate `model_normalized_4096.npz` under `data/models/<model_name>/`.
+- `data_util/template_preprocessing/preprocess_obj.py`: if you are preparing a new template mesh, you can use this script to normalize the template and generate `vertices.txt`, `topology.txt`, and `adjacencies.txt`.
+- `data_util/template_preprocessing/preprocess_symmetry.py`: if your template is symmetric, you can use this script to generate `symmetries.txt` from the processed template vertices.
+
 ## How To Use
-
-The runnable shell scripts are stored in `scripts/`:
-
-- `scripts/preprocess.sh`
-- `scripts/train.sh`
-- `scripts/post_perceptual.sh`
-
-Before running them, edit the variables at the top of each script, especially:
-
-- `model_name`
-- `epoch`
-- `learning_rate`
-- `template`
-
-Run all commands from the repository root.
-
-### 1. Preprocessing
-
-Command:
-
-```bash
-bash scripts/preprocess.sh
-```
-
-What it does:
-
-- Loads the input point cloud from `data/models/<model_name>/model_normalized_4096.npz`.
-- Renders multi-view images of the point cloud.
-- Computes alpha-shape contour images.
-- Trains view-dependent weights for the point cloud.
-- Saves preprocessing outputs to `outputs/<model_name>/prep_outputs/`.
-
-Main outputs:
-
-- `outputs/<model_name>/prep_outputs/render_outputs/`
-- `outputs/<model_name>/prep_outputs/alpha_outputs/`
-- `outputs/<model_name>/prep_outputs/train_outputs/weights.pt`
-- `outputs/<model_name>/prep_outputs/train_outputs/multi_view.obj`
-
-### 2. Training
-
-Command:
-
-```bash
-bash scripts/train.sh
-```
-
-What it does:
-
-- Loads the preprocessing result `weights.pt`.
-- Loads the template and target point cloud.
-- Optimizes the template control points to fit the target shape.
-- Writes intermediate fitting results and the final control points.
-
-Main outputs:
-
-- `outputs/<model_name>/control_points.obj`
-- `outputs/<model_name>/model_weights.pth`
-- `outputs/<model_name>/save_opt/`
-- `outputs/<model_name>/logs/`
-
-### 3. Post-Perceptual Pruning
-
-Command:
-
-```bash
-bash scripts/post_perceptual.sh
-```
-
-What it does:
-
-- Loads the fitted control points from training.
-- Evaluates curves with a multi-view perceptual criterion.
-- Removes redundant curves while preserving connectivity.
-- Exports the pruned wire structure for downstream use.
-
-Main outputs:
-
-- `outputs/<model_name>/post_outputs/`
-
-## Recommended Pipeline
 
 Run the scripts in this order:
 
 ```bash
 bash scripts/preprocess.sh
 bash scripts/train.sh
-bash scripts/post_perceptual.sh
+bash scripts/postprocess.sh
 ```
-

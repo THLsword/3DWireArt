@@ -5,7 +5,7 @@ template=sphere24
 # templates: [donut, cube24, sphere24, sphere54]
 output_filename=outputs/${model_name}
 
-# python src/post_perceptual.py \
+# python src/postprocess.py \
 # --model_path=./data/models/${model_name} \
 # --template_path=data/templates/${template} \
 # --output_path=./${output_filename} \
@@ -14,7 +14,7 @@ output_filename=outputs/${model_name}
 # --object_curve_num=48 \
 # --mv_thresh=0.1
 
-python src/post_perceptual.py \
+python src/postprocess.py \
 --model_path=./data/models/${model_name} \
 --template_path=data/templates/${template} \
 --output_path=./${output_filename} \
@@ -23,7 +23,7 @@ python src/post_perceptual.py \
 --object_curve_num=35 \
 --mv_thresh=0.1
 
-# python src/post_perceptual.py \
+# python src/postprocess.py \
 # --model_path=./data/models/${model_name} \
 # --template_path=data/templates/${template} \
 # --output_path=./${output_filename} \
