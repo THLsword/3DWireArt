@@ -1,77 +1,142 @@
-## environment 
-### conda <br>
-```
+# WireArtFitting
+
+## How To Start
+
+### 1. Create the environment
+
+```bash
 conda create -n wire python=3.9.21
 conda activate wire
 ```
-### pytorch 2.0.1 <br>
-```
+
+### 2. Install PyTorch
+
+```bash
 conda install pytorch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 pytorch-cuda=11.7 -c pytorch -c nvidia
 ```
----
 
-### pytorch3d-v0.7.4 installation <br>
-Refer to [pytorch3d v0.7.4 github-install](https://github.com/facebookresearch/pytorch3d/blob/v0.7.4/INSTALL.md)
+### 3. Install PyTorch3D
 
-```
+Follow the official installation guide for PyTorch3D v0.7.4:
+
+- https://github.com/facebookresearch/pytorch3d/blob/v0.7.4/INSTALL.md
+
+Conda installation:
+
+```bash
 conda install -c fvcore -c iopath -c conda-forge fvcore iopath
 conda install -c bottler nvidiacub
 conda install pytorch3d -c pytorch3d
 ```
-[anaconda-pytorch3d-v0.7.4 file](https://anaconda.org/pytorch3d/pytorch3d/files?page=1&version=0.7.4) if needed
 
----
+If you need prebuilt package information:
 
-### requirements:<br>
-```
+- https://anaconda.org/pytorch3d/pytorch3d/files?page=1&version=0.7.4
+
+### 4. Install Python dependencies
+
+```bash
 pip install -r requirements.txt
 ```
-<br>
-<br>
 
----
-# Environment for wsl <br>
-Refer to https://blog.csdn.net/m0_46349114/article/details/137602382
-```
-sudo apt update && sudo apt upgrade
-sudo apt install build-essential
-```
-### download cuda toolkit 11.8 <br>
-Link: [CUDA Toolkit 11.8 Downloads](https://developer.nvidia.com/cuda-11-8-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=WSL-Ubuntu&target_version=2.0&target_type=runfile_local)
-```
-wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run
-sudo sh cuda_11.8.0_520.61.05_linux.run
-```
-### Environment setting
-```
-vim ~/.bashrc
-export PATH=/usr/local/cuda/bin/:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64/:$LD_LIBRARY_PATH
-:wq
-source ~/.bashrc
-```
-```
-nvcc -V
-```
-### miniconda installation <br> 
-refer to [CUDA Toolkit 11.8 Downloads](https://developer.nvidia.com/cuda-11-8-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=WSL-Ubuntu&target_version=2.0&target_type=runfile_local)
+## Data Preparation
 
-### pytorch 2.0.1
-```
-conda install pytorch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 pytorch-cuda=11.8 -c pytorch -c nvidia
+Put each input model under `data/models/<model_name>/`.
+
+The current scripts assume the point cloud file is:
+
+```text
+data/models/<model_name>/model_normalized_4096.npz
 ```
 
-### pytorch3d-v0.7.7 installation <br>
-Refer to [pytorch3d v0.7.7 github-install](https://github.com/facebookresearch/pytorch3d/blob/v0.7.7/INSTALL.md)
+## How To Use
 
-```
-conda install -c fvcore -c iopath -c conda-forge fvcore iopath
-conda install -c bottler nvidiacub
-conda install pytorch3d -c pytorch3d
-```
-[anaconda-pytorch3d-v0.7.7 file](https://anaconda.org/pytorch3d/pytorch3d/files?page=1&version=0.7.7) if needed
+The runnable shell scripts are stored in `scripts/`:
 
-### requirements:<br>
+- `scripts/preprocess.sh`
+- `scripts/train.sh`
+- `scripts/post_perceptual.sh`
+
+Before running them, edit the variables at the top of each script, especially:
+
+- `model_name`
+- `epoch`
+- `learning_rate`
+- `template`
+
+Run all commands from the repository root.
+
+### 1. Preprocessing
+
+Command:
+
+```bash
+bash scripts/preprocess.sh
 ```
-pip install -r requirements.txt
+
+What it does:
+
+- Loads the input point cloud from `data/models/<model_name>/model_normalized_4096.npz`.
+- Renders multi-view images of the point cloud.
+- Computes alpha-shape contour images.
+- Trains view-dependent weights for the point cloud.
+- Saves preprocessing outputs to `outputs/<model_name>/prep_outputs/`.
+
+Main outputs:
+
+- `outputs/<model_name>/prep_outputs/render_outputs/`
+- `outputs/<model_name>/prep_outputs/alpha_outputs/`
+- `outputs/<model_name>/prep_outputs/train_outputs/weights.pt`
+- `outputs/<model_name>/prep_outputs/train_outputs/multi_view.obj`
+
+### 2. Training
+
+Command:
+
+```bash
+bash scripts/train.sh
 ```
+
+What it does:
+
+- Loads the preprocessing result `weights.pt`.
+- Loads the template and target point cloud.
+- Optimizes the template control points to fit the target shape.
+- Writes intermediate fitting results and the final control points.
+
+Main outputs:
+
+- `outputs/<model_name>/control_points.obj`
+- `outputs/<model_name>/model_weights.pth`
+- `outputs/<model_name>/save_opt/`
+- `outputs/<model_name>/logs/`
+
+### 3. Post-Perceptual Pruning
+
+Command:
+
+```bash
+bash scripts/post_perceptual.sh
+```
+
+What it does:
+
+- Loads the fitted control points from training.
+- Evaluates curves with a multi-view perceptual criterion.
+- Removes redundant curves while preserving connectivity.
+- Exports the pruned wire structure for downstream use.
+
+Main outputs:
+
+- `outputs/<model_name>/post_outputs/`
+
+## Recommended Pipeline
+
+Run the scripts in this order:
+
+```bash
+bash scripts/preprocess.sh
+bash scripts/train.sh
+bash scripts/post_perceptual.sh
+```
+
