@@ -10,19 +10,6 @@ from optimization import opt_training
 from common import LoadDataResult
 
 
-def str2bool(value):
-    """Parse common string representations of booleans for argparse."""
-    if isinstance(value, bool):
-        return value
-
-    value = value.lower()
-    if value in {"true", "1", "yes", "y"}:
-        return True
-    if value in {"false", "0", "no", "n"}:
-        return False
-    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
-
-
 def load_data(model_path, prep_output_path, template_path):
     """Load the point cloud, preprocessing output, and template data."""
     # Load point cloud and normals.
@@ -84,26 +71,20 @@ def main(**kwargs):
 
 
 if __name__ == "__main__":
-    # `python src/train.py`
     model = "rabbit"
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default=f"data/models/{model}")
-    # parser.add_argument("--template_path", type=str, default="data/templates/cube24")
     parser.add_argument("--template_path", type=str, default="data/templates/sphere24")
-    # parser.add_argument("--template_path", type=str, default="data/templates/donut")
     parser.add_argument("--output_path", type=str, default=f"outputs/{model}")
     parser.add_argument("--prep_output_path", type=str, default=f"outputs/{model}/prep_outputs/train_outputs")
-
     parser.add_argument("--epoch", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=1)  # 不要改，就是 1
     parser.add_argument("--learning_rate", type=float, default=0.0005)
-
-    parser.add_argument("--d_curve", type=str2bool, default=False)  # 是否删掉不需要的 curve
-    parser.add_argument("--k", type=int, default=2)  # 曲线采样点最近的 k 个点
-    parser.add_argument("--match_rate", type=float, default=0.2)
-
-    parser.add_argument("--prep_bool", type=str2bool, default=True)  # 是否加入前处理的点云作为 cross attention
-    parser.add_argument("--view_angels", type=float, nargs="+", default=[45, 90, 135, 225, 270, 315])
+    parser.add_argument(
+        "--view_angels",
+        type=float,
+        nargs="+",
+        default=[45, 90, 135, 225, 270, 315],  # Multi-view render angles.
+    )
     args = parser.parse_args()
 
     main(**vars(args))

@@ -591,7 +591,7 @@ def curve_curvature_loss(curves, linspace):
 
     return curvature
 
-def compute_beam_gap_loss(
+def compute_concavity_enhancement_loss(
         points:torch.Tensor, 
         normals:torch.Tensor, 
         pcd_points:torch.Tensor, 

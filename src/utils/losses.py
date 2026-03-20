@@ -578,7 +578,7 @@ def curve_curvature_loss(curves, linspace):
     return curvature
 
 
-def compute_beam_gap_loss(points, normals, pcd_points, thres):
+def compute_concavity_enhancement_loss(points, normals, pcd_points, thres):
     # view [b, n, 3]
     batch_size = points.shape[0]
     points = points.view(batch_size, -1, 3)

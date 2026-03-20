@@ -1,20 +1,12 @@
 import os
-import math
 import torch
-import torch.nn as nn
-from torch.optim.lr_scheduler import LambdaLR
-import matplotlib.pyplot as plt
 import numpy as np
 import argparse
-from einops import rearrange, repeat
 from PIL import Image, ImageDraw
 import networkx as nx
 from scipy.interpolate import BSpline
 import alphashape
-import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-import psutil
-import gc
 from tqdm import tqdm
 import time
 
@@ -23,12 +15,9 @@ from dataset.load_template import load_template
 from utils.patch_utils import *
 from utils.losses import *
 from utils.curve_utils import *
-from utils.postprocess_utils import get_unique_curve, project_curve_to_pcd, delete_single_curve, create_curve_graph, find_deletable_edges, compute_IOU
+from utils.postprocess_utils import get_unique_curve, project_curve_to_pcd
 from utils.create_mesh import create_mesh
-from utils.graph_utils import minimum_path_coverage
-from utils.save_data import save_img, save_pcd_obj, save_curves
-
-from model.model_interface import Model
+from utils.save_data import save_pcd_obj
 
 def create_bspline(mean_curve_points):
     print("mean_curve_points:", mean_curve_points.shape)
@@ -167,215 +156,169 @@ def graph_curve_removable(G, idx):
     else:
         return True
 
+def build_rotation_matrices():
+    """Create the fixed view set used for multi-view silhouette scoring."""
+    rotate_y_angles = [-np.pi * 0.33, 0.0, np.pi * 0.33, np.pi / 2, np.pi - np.pi * 0.33]
+    rotate_matrices = [
+        np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)],
+        ])
+        for angle in rotate_y_angles
+    ]
+    rotate_matrices.append(np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1],
+    ]))
+    return np.stack(rotate_matrices, axis=0)
+
+def collect_curve_indices(G, excluded_idx=None):
+    """Flatten the curve ids stored on graph edges, optionally skipping one edge."""
+    curve_indices = []
+    for start_node, end_node in G.edges:
+        edge_curve_indices = G.edges[start_node, end_node]['idx']
+        if edge_curve_indices == excluded_idx:
+            continue
+        curve_indices.extend(edge_curve_indices)
+    return curve_indices
+
+def compute_multiview_areas(bspline_points, rotate_matrices, image_size, alpha_value, executor):
+    """Render all predefined views and return the alpha-shape area for each view."""
+    rotated_bsplines = np.stack([bspline_points @ matrix.T for matrix in rotate_matrices], axis=0)
+    render_inputs = [
+        {
+            'bspline_remian': points,
+            'image_size': image_size,
+            'i': view_idx,
+            'alpha_value': alpha_value,
+            'save_img': False,
+        }
+        for view_idx, points in enumerate(rotated_bsplines)
+    ]
+    return np.array([area for area, _ in executor.map(render, render_inputs)])
+
+def export_curve_mesh(curves, curve_indices, output_path, object_curve_num, radius):
+    """Sample the remaining Bezier curves and export them as a mesh."""
+    bezier_t = torch.linspace(0, 1, 16).to(curves).flatten()[..., None]
+    remaining_curve_cps = torch.stack([curves[idx] for idx in curve_indices])
+    remaining_curve_points = bezier_sample(bezier_t, remaining_curve_cps)
+    create_mesh(remaining_curve_points, radius, output_path, object_curve_num)
+
 def training(**kwargs):
+    """Prune redundant curves by multi-view alpha-shape loss while preserving connectivity."""
     torch.cuda.empty_cache()
     if torch.cuda.is_available():
-        device = torch.device("cuda:0")
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
-        
-    # Load .npz point cloud.
+        torch.cuda.set_device(torch.device("cuda:0"))
+
+    # Load the target point cloud and the template topology used to index curves.
     model_path = kwargs['model_path']
     output_path = kwargs['output_path']
-    pcd_points, pcd_normals = load_npz(model_path)
-    # pcd_points, pcd_normals, pcd_area = pcd_points.to(device), pcd_normals.to(device), pcd_area.to(device)
-    pcd_maen = abs(pcd_points).mean(0)  # [3]
-
-    # Load template.
+    post_output_path = os.path.join(output_path, 'post_outputs')
+    os.makedirs(post_output_path, exist_ok=True)
+    pcd_points, _ = load_npz(model_path)
     batch_size = kwargs['batch_size']
-    template_path = kwargs['template_path']
-    template_params, vertex_idx, face_idx, symmetriy_idx, curve_idx = load_template(template_path)
-    # template_params, vertex_idx, face_idx, symmetriy_idx, curve_idx =\
-    # template_params.to(device), vertex_idx.to(device), face_idx.to(device), symmetriy_idx.to(device), curve_idx.to(device)
-    
+    _, _, face_idx, _, curve_idx = load_template(kwargs['template_path'])
     sample_num = int(np.ceil(np.sqrt(4096 / face_idx.shape[0])))
-    # Resize template to be similar in size.
-    template_mean = abs(template_params.view(-1, 3)).mean(0)  # [3]
-    template_params = (template_params.view(-1, 3) / template_mean * pcd_maen)
-    template_params = template_params.repeat(batch_size, 1, 1)
 
-    # Remove duplicated curves: curves were calculated twice.
+    # Remove duplicate template curves and keep graph indices aligned with the optional mask.
     curve_idx = get_unique_curve(curve_idx)
-    G = create_graph(curve_idx)
-
-    # Load control points -> curves.
-    output_path = kwargs['output_path']
     control_points = load_obj(f"{output_path}/control_points.obj")
     curves = control_points[curve_idx]  # (curve_num, cp_num, 3)
-    # Optionally delete unused curves.
-    if os.path.exists(f'{output_path}/curves_mask.pt') and kwargs['d_curve']:
-        curves_mask = torch.load(f'{output_path}/curves_mask.pt')
+    curves_mask_path = f'{output_path}/curves_mask.pt'
+    if os.path.exists(curves_mask_path) and kwargs['d_curve']:
+        curves_mask = torch.load(curves_mask_path)
+        curve_idx = curve_idx[curves_mask]
         curves = curves[curves_mask]
+    G = create_graph(curve_idx)
 
-    ################### post-processing #################
-    ################### post-processing #################
-    # project_curve_to_pcd
-    '''  (n, 3) only used to save as obj
-    review_idx :     (curve_num, 140, k) index of pcd
-    curve_cood_list: (curve_num, n, 3)
-    '''
-    sampled_pcd, review_idx, _, curve_cood_list = project_curve_to_pcd(curves, pcd_points.repeat(batch_size, 1, 1), batch_size, sample_num, kwargs['k'])
+    # Associate each fitted curve with nearby point-cloud support before perceptual pruning.
+    sampled_pcd, review_idx, _, _ = project_curve_to_pcd(
+        curves,
+        pcd_points.repeat(batch_size, 1, 1),
+        batch_size,
+        sample_num,
+        kwargs['k'],
+    )
     print("project to point cloud")
-    save_pcd_obj(f"{output_path}/sampled_pcd.obj", sampled_pcd)
+    save_pcd_obj(f"{post_output_path}/sampled_pcd.obj", sampled_pcd)
 
-    # Get B-splines and determine different views.
-    all_bspline = create_bspline(pcd_points[review_idx].mean(dim=2))  # (48, 400, 3)
-
-    # Rotation matrix (will project to yz plane).
-    rotate_y_angels = [-np.pi * 0.33, 0.0, np.pi * 0.33, np.pi / 2, np.pi - np.pi * 0.33]
-    rotate_matrix = []
-    for i in rotate_y_angels:
-        matrix = np.array([
-            [np.cos(i), 0, np.sin(i)],
-            [0, 1, 0],
-            [-np.sin(i), 0, np.cos(i)]
-        ])
-        rotate_matrix.append(matrix)
-    # 俯视视角
-    rotate_matrix.append([
-            [0, -1, 0],
-            [1, 0, 0],
-            [0, 0, 1]
-        ])
-    rotate_matrix = np.stack(rotate_matrix)
-
-    object_curve_num = kwargs['object_curve_num']
-
-    # Render alpha shape before removing curves.
+    # Smooth the projected support points and evaluate them from a fixed set of views.
+    all_bspline = create_bspline(pcd_points[review_idx].mean(dim=2))
+    rotate_matrices = build_rotation_matrices()
     image_size = 128
     alpha_value = kwargs['alpha_value']
-    bspline_remian = all_bspline.reshape((-1, 3))
-    # Rotate bspline.
-    rotated_bsplines = []
-    for mat in rotate_matrix:
-        transformed = bspline_remian @ mat.T
-        rotated_bsplines.append(transformed)
-    rotated_bsplines = np.stack(rotated_bsplines, axis=0)
-
-    data_list = []
-    for i, value in enumerate(rotated_bsplines):
-        data_list.append({'bspline_remian': value, 'image_size': image_size, 'i': i, 'alpha_value': alpha_value, 'save_img': False})
-    with ProcessPoolExecutor(max_workers=len(rotate_matrix)) as executor:
-        as_results = list(executor.map(render, data_list))  # list[(area, length), ...]
-    area_before_delet = []  # Area before deleting.
-    length_bd = []  # Length before deleting.
-    for as_result in as_results:
-        area_before_delet.append(as_result[0])
-        length_bd.append(as_result[1])
-
-    ## Start removing curves.
+    object_curve_num = kwargs['object_curve_num']
     mv_thresh = kwargs['mv_thresh']
-    curves_ramian = curve_cood_list.copy()
-    area_global = np.array(area_before_delet)  # Global baseline before removing.
-    while True:
-        if object_curve_num == 48:
-            break
-        delete_idx = []
-        min_IOU_loss = 1
-        for edge in tqdm(list(G.edges)):
-            j = G.edges[edge[0],edge[1]]['idx'] # list
-            # detect
-            continue_bool = False
-            if not graph_curve_removable(G, j):
-                continue_bool = True
-            if continue_bool:
-                continue
-            
-            ## IOU area/length after deletion
-            remain_idx_list = []  # idx list except j
-            for k in list(G.edges):
-                idx_list = G.edges[k[0],k[1]]['idx']
-                if idx_list != j:
-                    for l in idx_list:
-                        remain_idx_list.append(l)
-            bspline_remian = all_bspline[remain_idx_list].reshape((-1, 3))
-            data_list = []
-            area_ad = []
-            length_ad = []
-            # Rotate bspline.
-            rotated_bsplines = []
-            for mat in rotate_matrix:
-                transformed = bspline_remian @ mat.T
-                rotated_bsplines.append(transformed)
-            rotated_bsplines = np.stack(rotated_bsplines, axis=0)
-            for i, value in enumerate(rotated_bsplines):
-                data_list.append({'bspline_remian': value, 'image_size': image_size, 'i': i, 'alpha_value': alpha_value, 'save_img': False})
-            with ProcessPoolExecutor(max_workers=len(rotate_matrix)) as executor:
-                as_results = list(executor.map(render, data_list))
-            for as_result in as_results:
-                area_ad.append(as_result[0])
-                length_ad.append(as_result[1])
 
-            IOU_loss_global = max((area_global - np.array(area_ad)) / area_global)
-            if IOU_loss_global < min_IOU_loss:
-                min_IOU_loss = IOU_loss_global
-                delete_idx = j
+    with ProcessPoolExecutor(max_workers=len(rotate_matrices)) as executor:
+        area_global = compute_multiview_areas(
+            all_bspline.reshape((-1, 3)),
+            rotate_matrices,
+            image_size,
+            alpha_value,
+            executor,
+        )
 
-        if min_IOU_loss > mv_thresh and min_IOU_loss != 1:
-            print("min_IOU_loss:", min_IOU_loss," > mv_thresh")
-            break
-        # Delete the selected curve from the graph.
-        G = graph_delete_curve(G, delete_idx)
-        print("min IOU loss: ", min_IOU_loss)
-        # Break condition.
-        remain_idx_list = []
-        for k in list(G.edges):
-            idx_list = G.edges[k[0],k[1]]['idx']
-            for l in idx_list:
-                remain_idx_list.append(l)
-        print("curves remain : ", len(remain_idx_list))
+        # Greedily delete the curve that least changes the global silhouettes.
+        while object_curve_num < len(collect_curve_indices(G)):
+            delete_idx = None
+            min_iou_loss = float('inf')
+            area_denom = np.maximum(area_global, 1e-8)
 
-        if object_curve_num < 35 and len(remain_idx_list) == 35:
-            linspace = torch.linspace(0, 1, 16).to(curves).flatten()[..., None]
-            curves_ramian_cps = torch.stack([curves[k] for k in remain_idx_list]) # [curve_num, cp_num, 3]
-            curves_ramian_points = bezier_sample(linspace, curves_ramian_cps) # [curve_num, sample_num, 3]
-            create_mesh(curves_ramian_points, 0.003, output_path, 35)
-        
-        if len(remain_idx_list) <= object_curve_num:
-            print("len(remain_idx_list) <= object_curve_num")
-            break
+            for edge in tqdm(list(G.edges)):
+                edge_curve_indices = G.edges[edge[0], edge[1]]['idx']
+                if not graph_curve_removable(G, edge_curve_indices):
+                    continue
 
-    remain_idx_list = []
-    for k in list(G.edges):
-        idx_list = G.edges[k[0],k[1]]['idx']
-        for l in idx_list:
-            remain_idx_list.append(l)
-    curves_ramian_tensor = torch.cat([curves_ramian[k] for k in remain_idx_list])
-    bspline_remian = all_bspline[remain_idx_list].reshape((-1, 3))
+                remaining_curve_indices = collect_curve_indices(G, excluded_idx=edge_curve_indices)
+                candidate_areas = compute_multiview_areas(
+                    all_bspline[remaining_curve_indices].reshape((-1, 3)),
+                    rotate_matrices,
+                    image_size,
+                    alpha_value,
+                    executor,
+                )
+                iou_loss_global = np.max((area_global - candidate_areas) / area_denom)
+                if iou_loss_global < min_iou_loss:
+                    min_iou_loss = iou_loss_global
+                    delete_idx = edge_curve_indices
+
+            if delete_idx is None:
+                print("No removable curve remains; stop pruning.")
+                break
+            if min_iou_loss > mv_thresh:
+                print("min_IOU_loss:", min_iou_loss, " > mv_thresh")
+                break
+
+            G = graph_delete_curve(G, delete_idx)
+            remaining_curve_indices = collect_curve_indices(G)
+            print("min IOU loss: ", min_iou_loss)
+            print("curves remain : ", len(remaining_curve_indices))
+
+            if object_curve_num < 35 and len(remaining_curve_indices) == 35:
+                export_curve_mesh(curves, remaining_curve_indices, post_output_path, 35, 0.003)
+
+    remaining_curve_indices = collect_curve_indices(G)
     print('object_curve_num: ', object_curve_num)
-    # create_mesh(all_bspline[remain_idx_list], 0.003, output_path)
 
-    # Create mesh: template Bezier curves.
-    linspace = torch.linspace(0, 1, 16).to(curves).flatten()[..., None]
-    curves_ramian_cps = torch.stack([curves[k] for k in remain_idx_list]) # [curve_num, cp_num, 3]
-    curves_ramian_points = bezier_sample(linspace, curves_ramian_cps) # [curve_num, sample_num, 3]
-    create_mesh(curves_ramian_points, 0.002, output_path, object_curve_num)
-    
-    # save_pcd_obj(f"{output_path}/sampled_pcd_perceptual.obj", curves_ramian_tensor)
-    # save_pcd_obj(f"{output_path}/spline_perceptual.obj", bspline_remian)
+    # Export the final remaining curves for downstream inspection and fabrication.
+    export_curve_mesh(curves, remaining_curve_indices, post_output_path, object_curve_num, 0.002)
         
 if __name__ == '__main__':
     start_time = time.time()
     model = 'tower'
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default=f"data/models/{model}")
-    # parser.add_argument('--template_path', type=str, default="data/templates/sphere24")
     parser.add_argument('--template_path', type=str, default="data/templates/cube24")
     parser.add_argument('--output_path', type=str, default=f"outputs/{model}")
-    parser.add_argument('--prep_output_path', type=str, default=f"outputs/{model}/prep_outputs/train_outputs")
-
-    parser.add_argument('--epoch', type=int, default="201")
-    parser.add_argument('--batch_size', type=int, default="1") # 不要改，就是1
-    parser.add_argument('--learning_rate', type=float, default="0.0005")
-
-    parser.add_argument('--d_curve', type=bool, default=False) # 是否删掉不需要的curve
-    parser.add_argument('--k', type=int, default=10) # 裡curve採樣點最近的k個點
-    parser.add_argument('--match_rate', type=float, default=0.2)
+    parser.add_argument('--batch_size', type=int, default=1)  # Keep this as 1.
+    parser.add_argument('--d_curve', type=bool, default=False)  # Drop masked curves if needed.
+    parser.add_argument('--k', type=int, default=10)  # Number of nearest points per curve sample.
     parser.add_argument('--alpha_value', type=float, default=0.25)
     parser.add_argument('--object_curve_num', type=int, default=48)
     parser.add_argument('--mv_thresh', type=float, default=0.10)
-    parser.add_argument('--crossattention', type=bool, default=True)
 
     args = parser.parse_args()
     training(**vars(args))

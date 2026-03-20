@@ -10,7 +10,7 @@ from utils import coons_points, coons_normals, coons_mtds
 from utils import bezier_sample
 from utils import PointcloudRenderer, save_img
 from .loss_functions import area_weighted_chamfer_loss, compute_batch_chamfer, planar_patch_loss, patch_overlap_loss
-from .loss_functions import curve_perpendicular_loss, flatness_area_loss, patch_symmetry_loss, curve_curvature_loss, compute_beam_gap_loss
+from .loss_functions import curve_perpendicular_loss, flatness_area_loss, patch_symmetry_loss, curve_curvature_loss, compute_concavity_enhancement_loss
 from .loss_functions import curvature_loss, patch_rectangular_loss, chamfer_and_grad_uniformity, compute_G1_loss
 import math
 from einops import rearrange
@@ -20,152 +20,6 @@ import collections
 from PIL import Image
 import os
 from typing import Optional
-
-# def compute_loss(inputs: LossInputs, state: TrainState):
-#     """
-#     参数:  
-#         inputs: GeometryInputs 数据结构，封装了所有模型输入数据  
-#         state: TrainState 结构, 包含当前步骤和總epoch數  
-#     """
-#     # 取出參數
-#     cp_coord = inputs.cp_coord
-#     patches = inputs.patches
-#     curves = inputs.curves
-#     pcd_points = inputs.pcd_points
-#     pcd_normals = inputs.pcd_normals
-#     prep_points = inputs.prep_points
-#     sample_num = inputs.sample_num
-#     tpl_sym_idx = inputs.tpl_sym_idx
-#     prep_weights_scaled = inputs.prep_weights_scaled
-#     i = state.step
-#     epoch = state.epoch
-
-#     device = patches.device
-#     batch_size = patches.shape[0]
-#     face_num = patches.shape[1]
-    
-#     st = torch.empty(batch_size, face_num, sample_num**2, 2).uniform_().to(device) # [b, patch_num, sample_num, 2]
-
-#     # preprocessing
-#     # patches (B,face_num,cp_num,3)
-#     points  = coons_points(st[..., 0], st[..., 1], patches) # [b, patch_num, sample_num, 3]
-#     normals = coons_normals(st[..., 0], st[..., 1], patches)
-#     mtds    = coons_mtds(st[..., 0], st[..., 1], patches)   # [b, patch_num, sample_num] 
-
-#     # area-weighted chamfer loss (position + normal)
-#     chamfer_loss, normal_loss = area_weighted_chamfer_loss(
-#         mtds, points, normals, 
-#         pcd_points, pcd_normals, 
-#         prep_weights_scaled,
-#     )
-
-#     # # curve (b, curve_num, cp_num, 3) chamfer loss
-#     # curves_sample_num = 16
-#     # linspace = torch.linspace(0, 1, curves_sample_num).to(curves).flatten()[..., None]
-#     # curve_points = bezier_sample(linspace, curves)
-#     # curve_chamfer_loss, _, _, _ = compute_batch_chamfer(curve_points, pcd_points*1.01)
-#     # curve_chamfer_loss = curve_chamfer_loss.mean(1)
-
-#     # flatness loss
-#     planar_loss = planar_patch_loss(st, points, mtds)
-
-#     # symmetry loss
-#     symmetry_loss = torch.zeros(1).to(patches)
-#     symmetry_loss = patch_symmetry_loss(tpl_sym_idx[0], tpl_sym_idx[1], cp_coord)
-
-#     # beam gap loss
-#     thres = 0.9
-#     beam_gap_loss = compute_beam_gap_loss(points, normals, pcd_points, pcd_points, thres)
-#     # beam_gap_loss = compute_beam_gap_loss(points, normals, pcd_points, prep_points, thres)
-
-#     # # curvature loss
-#     # curv_loss = curvature_loss(curves) # =0.002
-
-#     # patch rectangular loss
-#     rectangular_loss = patch_rectangular_loss(patches)
-
-#     # stable_loss = chamfer_loss + 2*planar_loss + 0.1*symmetry_loss + normal_loss + 0.2 * beam_gap_loss
-#     stable_loss =  chamfer_loss + 2.0 * planar_loss + 0.1 * symmetry_loss + 0.005*normal_loss + 0.20 * beam_gap_loss + 0.02 * rectangular_loss# + 0.1 * curv_loss 
-#     loss = stable_loss
-
-#     return loss.mean()
-
-# def compute_loss_stage2(inputs: LossInputs, state: TrainState):
-#     """
-#     参数:  
-#         inputs: GeometryInputs 数据结构，封装了所有模型输入数据  
-#         state: TrainState 结构, 包含当前步骤和總epoch數  
-#     """
-#     # 取出參數
-#     cp_coord = inputs.cp_coord
-#     patches = inputs.patches
-#     curves = inputs.curves
-#     pcd_points = inputs.pcd_points
-#     pcd_normals = inputs.pcd_normals
-#     prep_points = inputs.prep_points
-#     sample_num = inputs.sample_num
-#     tpl_sym_idx = inputs.tpl_sym_idx
-#     prep_weights_scaled = inputs.prep_weights_scaled
-#     i = state.step
-#     epoch = state.epoch
-
-#     device = patches.device
-#     batch_size = patches.shape[0]
-#     face_num = patches.shape[1]
-    
-#     # preprocessing
-#         # patches (B,face_num,cp_num,3)
-#     st = torch.empty(batch_size, face_num, sample_num**2, 2).uniform_().to(device) # [b, patch_num, sample_num, 2]
-#     points  = coons_points(st[..., 0], st[..., 1], patches) # [b, patch_num, sample_num, 3]
-#     normals = coons_normals(st[..., 0], st[..., 1], patches)
-#     mtds    = coons_mtds(st[..., 0], st[..., 1], patches)   # [b, patch_num, sample_num] 
-
-#     # area-weighted chamfer loss (position + normal)
-#     chamfer_loss, normal_loss = area_weighted_chamfer_loss(
-#         mtds, points, normals, 
-#         pcd_points, pcd_normals, 
-#         prep_weights_scaled,
-#     )
-
-#     # curve chamfer loss
-#         # curves (b, curve_num, cp_num, 3)
-#     curves_sample_num = 16
-#     linspace = torch.linspace(0, 1, curves_sample_num).to(curves).flatten()[..., None]
-#     curve_points = bezier_sample(linspace, curves)
-#     curve_chamfer_loss, _, _, _ = compute_batch_chamfer(curve_points, pcd_points*1.01)
-#     curve_chamfer_loss = curve_chamfer_loss.mean(1)
-
-#     # multi view curve loss
-#     _, _, mv_curve_loss, _ = compute_batch_chamfer(curve_points, prep_points)
-#     mv_curve_loss = mv_curve_loss.mean(1)
-
-#     # flatness loss
-#     planar_loss = planar_patch_loss(st, points, mtds)
-
-#     # # Orthogonality loss
-#     # perpendicular_loss = curve_perpendicular_loss(patches)
-
-#     # # flatness loss
-#     # FA_loss = flatness_area_loss(st, points, mtds)
-
-#     # symmetry loss
-#     symmetry_loss = torch.zeros(1).to(patches)
-#     symmetry_loss = patch_symmetry_loss(tpl_sym_idx[0], tpl_sym_idx[1], cp_coord)
-
-#     # curvature loss
-#     curvature_loss = curve_curvature_loss(curves, linspace)
-
-#     # beam gap loss
-#     thres = 0.9
-#     beam_gap_loss = compute_beam_gap_loss(points, normals, pcd_points, pcd_points, thres)
-#     # beam_gap_loss = compute_beam_gap_loss(points, normals, pcd_points, prep_points, thres)
-
-#     # test loss
-#     # stable_loss = chamfer_loss + 2*planar_loss + 0.1*symmetry_loss + normal_loss + 0.2 * beam_gap_loss
-#     stable_loss =  chamfer_loss + 10.0 * planar_loss + 0.1 * symmetry_loss + 0.005*normal_loss + 0.20 * beam_gap_loss# + 0.003 * curvature_loss# + 0.005*overlap_loss
-#     loss = stable_loss
-
-#     return loss.mean()
 
 class CLIPVisualEncoder(nn.Module):
     def __init__(self, clip_model, device):
@@ -309,12 +163,18 @@ class ComputeLoss:
         symmetry_loss = patch_symmetry_loss(self.tpl_sym_idx[0],self. tpl_sym_idx[1], self.inputs.cp_coord)
         return symmetry_loss * weight
     
-    def compute_beam_gap_loss(self, weight=0.20):
+    def compute_concavity_enhancement_loss(self, weight=0.20):
         if weight == 0:
             return 0
         thres = 0.9
-        beam_gap_loss = compute_beam_gap_loss(self.points, self.normals, self.pcd_points, self.pcd_points, thres)
-        return beam_gap_loss * weight
+        concavity_enhancement_loss = compute_concavity_enhancement_loss(
+            self.points,
+            self.normals,
+            self.pcd_points,
+            self.pcd_points,
+            thres,
+        )
+        return concavity_enhancement_loss * weight
     
     def compute_curvature_loss(self, weight=0.002):
         if weight == 0:
